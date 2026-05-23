@@ -1,10 +1,15 @@
+import docker
+import os
+import sys
+
+from pathlib    import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from flask      import Flask, request, jsonify
 from dotenv     import load_dotenv
 from smolagents import CodeAgent, OpenAIServerModel
-from pathlib    import Path
 
-import docker
-import os
 
 from main.tools.container import \
     StartContainer,   \
@@ -24,9 +29,11 @@ from main.tools.repository import \
     GitCommit,       \
     PushBranch,      \
     OpenMergeRequest,\
-    CreateFile
+    CreateFile,      \
+    Comment
 
 load_dotenv()
+
 
 app = Flask(__name__)
 
@@ -71,7 +78,7 @@ def create_code_agent(model: OpenAIServerModel, user_comment: str, token: str):
                 target=volume_target,
                 source=local_repository_path,
             ),
-            InstallUtilities(client),
+            # InstallUtilities(client),
             RemoveContainer(client),
             CloneRepository(
                 host=GITLAB_HOST,
@@ -96,6 +103,11 @@ def create_code_agent(model: OpenAIServerModel, user_comment: str, token: str):
                 project_id=f"{PROJECT_ID}",
                 access_token=f"{GITLAB_TOKEN}",
                 default_title="Default Merge Request Title"
+            ),
+            Comment(
+                gitlab_url=f"http://{GITLAB_HOST}:{GITLAB_PORT}",
+                project_id=f"{PROJECT_ID}",
+                access_token=f"{GITLAB_TOKEN}"
             )
         ],
         stream_outputs=False,
@@ -116,6 +128,7 @@ def webhook():
         repository_url_with_token = f"http://oauth2:{GITLAB_TOKEN}@{GITLAB_HOST}:{GITLAB_PORT}/{payload['project']['path_with_namespace']}"
         user_comment = payload['object_attributes']['description']
         user_id      = str(payload['object_attributes']['author_id'])
+        noteable_id = payload['object_attributes']['noteable_id'] # Work item id
 
         if user_comment.startswith("@AGENT_DEV"):
             user_target = "DEVELOPER"
@@ -129,13 +142,17 @@ def webhook():
         # TODO: There should be a first repository load to identify the programming language for the agent to know what container image it should start (Python, Java, ...)
         # TODO: The token should somehow be handled by the agent in memory for not to be leaked to the prompt, maybe by some sort of authentication tool.
 
-        llm_message = f"""
+        agent_dev_prompt = f"""
+        You're a developer agent.
         The message of the work item was written by user with ID {user_id}.
         The message is targeted at a {user_target}.
         The user wrote this comment on the repository work item: {user_comment}.
         The host of the remote repository is {GITLAB_HOST} and the port is {GITLAB_PORT}.
         The namespace and project are {GITLAB_REPO} (provided in the format <NAMESPACE>/<PROJECT>).
         The complete URL of the repository of this work item is: {repository_url_with_token}.
+        The work item ID is {noteable_id}, use this ID to formulate the address of where you will send your reply to the comment.
+        Remember the work item ID as WORK_ITEM_ID.
+        This ID needs to be provided as the argument to the "comment" tool.
         You may use only this repository URL for any git operations, such as cloning or pushing commits.
         To work on the work item, you need to start a dedicated Docker container, a tool to do that is provided.
         You have exactly one Docker image provided to you for spinning up containers. The image is {DOCKER_IMAGE_ALPINE}.
@@ -147,7 +164,15 @@ def webhook():
         You will need to commit your changes.
         You will need to push your changes to the remote repository.
         You will need to open a merge request for your changes.
-        When you finish your work, you should remove the container that you started.
+        You need to leave a comment on the work item describing your changes.
+        If you opened a merge request and want to request a review, you should start the comment with "@AGENT_REV".
+        If you need more clarification on the work item, you should write a comment to the work item to ask for more clarifications.
+        When asking for more clarifications, start the comment with "@HUMAN".
+        When you finish your work, you should remove the container that you started and checkout branch "main" again.
+        """
+
+        agent_rev_prompt = f"""
+        You're a quality assurance and code reviewer agent.
         """
 
         print("FROM AUTHOR ID [" + user_id + "]: " + user_comment)
@@ -156,7 +181,7 @@ def webhook():
 
         if user_target == "DEVELOPER":
             agent = create_code_agent(model, user_comment, TOKEN)
-            agent.run(llm_message)
+            agent.run(agent_dev_prompt)
 
     else:
         print(f"📦 Received event: {event_type}")

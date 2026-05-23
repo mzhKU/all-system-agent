@@ -196,7 +196,7 @@ class GitCommit(Tool):
 
 class CheckoutBranch(Tool):
     name = "checkout_branch"
-    description = "Checks out a specified branch name within the local repository. Must be run against a valid, initialized git repository."
+    description = "Checks out an existing branch or creates and switches to a new one within the local repository."
     output_type = "string"
 
     def __init__(self, local_repository_path: str):
@@ -205,7 +205,7 @@ class CheckoutBranch(Tool):
         self._repo = None
         try:
             self._repo = git.Repo(local_repository_path)
-        except git.InvalidGitRepositoryError:
+        except (git.InvalidGitRepositoryError, git.NoSuchPathError):
             print(f"Warning: Initializing CheckoutBranch with invalid repository path: {local_repository_path}")
 
     @property
@@ -213,38 +213,34 @@ class CheckoutBranch(Tool):
         return {
             "branch_name": {
                 "type": "string",
-                "description": "The name of the new branch to check out. The branch name should be related to the work item."
+                "description": "The name of the branch to check out or create."
             }
         }
-    
-    def forward(self, branch_name: str):
-        """Executes the git checkout command."""
+
+    def forward(self, branch_name: str) -> str:
+        """Executes the git checkout command cleanly."""
         if self._repo is None:
             return "Error: This tool was initialized with a path that is not a valid git repository."
 
-        if not branch_name:
-            return "Error: Must provide a branch name to checkout."
-        
-        print(f"[Checkout Tool] Attempting to checkout branch: {branch_name} in {self.local_repository_path}")
-        
-        try:
-            self._repo.git.branch(branch_name)
-            self._repo.git.checkout(branch_name)
-            return f"Successfully checked out the branch '{branch_name}' in the repository at {self.local_repository_path}."
-        except git.GitCommandError as e:
-            if "already exists" in e.stderr:
-                return f"⚠️ Warning: Branch '{branch_name}' already exists locally. Attempting direct checkout instead."
-                # If it already exists, we can fall back to just checking it out
-                try:
-                    self._repo.git.checkout(branch_name)
-                    return f"✅ Success: Branch '{branch_name}' already existed and was successfully checked out."
-                except Exception as checkout_e:
-                    return f"Git Error: Could not checkout existing branch '{branch_name}'. {checkout_e}"
+        if not branch_name or not isinstance(branch_name, str):
+            return "Error: Branch name must be a non-empty string."
 
-            # Handle all other Git errors
-            return f"Git Error: Failed to create or checkout branch '{branch_name}'. Details: {e.stderr}"
+        print(f"[Checkout Tool] Attempting to checkout branch: {branch_name} in {self.local_repository_path}")
+
+        try:
+            # Check if branch exists in local references
+            if branch_name in self._repo.heads:
+                self._repo.git.checkout(branch_name)
+                return f"✅ Success: Switched to existing local branch '{branch_name}'."
+            
+            # If it does not exist locally, create and switch to it (-b flag equivalent)
+            self._repo.git.checkout("-b", branch_name)
+            return f"✅ Success: Created and switched to new branch '{branch_name}'."
+
+        except git.GitCommandError as e:
+            return f"Git Error: Failed to checkout branch '{branch_name}'. Details: {e.stderr.strip()}"
         except Exception as e:
-            return f"An unexpected error occurred during checkout: {e}"
+            return f"An unexpected error occurred during checkout: {str(e)}"
 
 
 class EditCode(Tool):
@@ -253,14 +249,13 @@ class EditCode(Tool):
     It operates on the physical file system path.
     """
     name = "edit_code"
-    description = "Overwrites a specific file within the active repository directory. Use this tool to make code changes before committing."
+    description = "Overwrites a specific file within the active repository directory." \
+        "IMPORTANT: The provided file_path MUST contain the full, complete relative path" \
+        "from the repository root (e.g., 'avclient/src/main/java/ch/mzh/avclient/domain/CurrencyModel.java')." \
+        "Use this tool to make code changes before committing."
     output_type = "string"
 
     def __init__(self, local_repository_path: Path):
-        """
-        Initializes the tool with the absolute path to the root of the repository 
-        within the mounted volume.
-        """
         super().__init__()
         self.local_repository_path = local_repository_path
         
@@ -269,7 +264,7 @@ class EditCode(Tool):
         return {
             "file_path": {
                 "type": "object",
-                "description": "The path to the file relative to the repository root (e.g., 'src/main.py'). The file must exist."
+                "description": "The path to the file relative to the repository root, including ALL necessary project directories (e.g., 'avclient/src/main/java/ch/mzh/avclient/domain/CurrencyModel.java'). This must be the full, correct relative path."
             },
             "content": {
                 "type": "string",
@@ -279,11 +274,11 @@ class EditCode(Tool):
     
     def forward(self, file_path: str, content: str) -> str:
         """
-        Handles the logic for overwriting the file content
+        Handles the logic for overwriting the file content.
         """
         target_path = self.local_repository_path / Path(file_path)
         if not target_path.exists():
-            return f"Error: The specified file path does not exist in the repository: {file_path}"
+            return f"Error: The specified file path does not exist in the repository: {file_path}. Please verify the full, correct path."
 
         try:
             target_path.write_text(content)
@@ -294,18 +289,14 @@ class EditCode(Tool):
 
 class CreateFile(Tool):
     """
-    A tool to create new, empty, or populated files within the mounted repository volume.
-    Use this tool when a file does not currently exist in the repository structure.
+    A tool to create new files within the mounted repository volume.
+    Use this tool when a file does not currently exist.
     """
     name = "create_file"
-    description = "Creates a new file at the specified path relative to the repository root and writes the given content to it. Use this when the file does not exist."
+    description = "Creates a new file at the specified path relative to the repository root. IMPORTANT: The provided file_path MUST contain the full, complete relative path from the repository root, including ALL necessary project directories (e.g., 'avclient/src/main/java/...')."
     output_type = "string"
 
     def __init__(self, local_repository_path: Path):
-        """
-        Initializes the tool with the absolute path to the root of the repository 
-        within the mounted volume.
-        """
         super().__init__()
         self.local_repository_path = local_repository_path
         
@@ -314,7 +305,7 @@ class CreateFile(Tool):
         return {
             "file_path": {
                 "type": "object",
-                "description": "The path to the file relative to the repository root (e.g., 'src/new_utils.py'). The parent directory structure must exist or the tool should create it."
+                "description": "The path to the file relative to the repository root, including ALL necessary project directories (e.g., 'avclient/src/main/java/ch/mzh/avclient/domain/CurrencyModel.java')."
             },
             "content": {
                 "type": "string",
@@ -333,13 +324,13 @@ class CreateFile(Tool):
         if not directory_path.exists():
             try:
                 # Attempt to create the necessary directory structure
+                # This assumes the directory structure *must* be created relative to the mount point.
                 directory_path.mkdir(parents=True, exist_ok=True)
                 print(f"Info: Created necessary directory structure at: {directory_path}")
             except Exception as e:
                 return f"Error: Could not create necessary directory structure for '{file_path}'. Check permissions. Details: {e}"
 
         try:
-            # Use write_text, which handles both creation and content writing
             target_path.write_text(content)
             return f"✅ Success: Created and wrote content to the new file '{file_path}' in the repository."
         except Exception as e:
@@ -569,13 +560,11 @@ class GeneratePlan(Tool):
 
 class OpenMergeRequest(Tool):
     """
-    Creates a Merge Request (MR) on GitLab, linking the pushed source branch 
-    to a target branch (usually 'main' or 'develop').
+    Creates or verifies a Merge Request (MR) on GitLab. If an MR already exists 
+    for the source branch, this tool retrieves and reports its details instead of failing.
     """
     name = "open_merge_request"
-    description = "Creates a Pull Request/Merge Request on GitLab." \
-    "This must be run after successfully pushing committed changes to a new branch." \
-    "It requires the source branch, target branch (e.g., 'main'), and a title."
+    description = "Creates a Pull Request/Merge Request on GitLab. This tool checks if an MR already exists for the source branch and, if so, reports its details. If it does not exist, a new MR is created. Requires the source branch, target branch, and a title."
     output_type = "string"
 
     def __init__(self, gitlab_url: str, project_id: str, access_token: str, default_title: str):
@@ -605,43 +594,41 @@ class OpenMergeRequest(Tool):
     
     def forward(self, source_branch: str, target_branch: str, custom_title: str) -> str:
         """
-        Connects to GitLab and creates the Merge Request.
+        Connects to GitLab and checks for or creates the Merge Request.
         """
         if not self.gitlab_url or not self.access_token or not self.project_id:
             return "Error: OpenMergeRequest could not be initialized. Missing GitLab URL, Token, or Project ID."
 
-        # Determine the title, falling back to the provided default
         title = custom_title if custom_title else self.default_title
         
         try:
             # 1. Initialize the GitLab client
-            gl = gitlab.Gitlab(self.gitlab_url, private_token=self.access_token, ssl_verify=False, keep_base_url=True) # ssl_verify=False for local Docker instance
+            gl = gitlab.Gitlab(self.gitlab_url, private_token=self.access_token, ssl_verify=False, keep_base_url=True)
             gl.auth()
             project = gl.projects.get(self.project_id)
 
             if not project:
                 return f"Error: Could not find project with ID {self.project_id}."
 
-            # 2. Create the Merge Request
+            # --- CHECK STAGE ---
+            # Check for existing open merge requests for this source branch
+            mr_list = project.mergerequests.list(source_branch=source_branch, state="opened")
+            if mr_list:
+                existing_mr = mr_list[0]
+
+                # TODO: Make this generic
+                # Statically construct the URL using class attributes and the MR IID
+                base = self.gitlab_url.rstrip("/")
+                repo_path = "mzhku/all-system-development"
+                corrected_url = f"{base}/{repo_path}/-/merge_requests/{existing_mr.iid}"         
+
+                return (f"✅ Found Existing MR: A Merge Request already exists for '{source_branch}' "
+                        f"targeting '{target_branch}'. Details: "
+                        f"MR ID: {existing_mr.iid}, Title: '{existing_mr.title}', "
+                        f"Link: {corrected_url}")
+
+            # --- CREATION STAGE ---
             try:
-                # Search for MRs matching the source branch
-                mr_list = project.mergerequests.list(source_branch=source_branch)
-                
-                # Simple check: if the list is populated, we assume an MR exists.
-                # A more rigorous check would verify the target branch matches, but checking for existence is sufficient here.
-                if mr_list:
-                    # Take the first existing MR found
-                    existing_mr = mr_list[0]
-                    return (f"✅ Found Existing MR: A Merge Request already exists for '{source_branch}' "
-                            f"targeting '{target_branch}'. Details: "
-                            f"MR ID: {existing_mr.iid}, Title: '{existing_mr.title}', "
-                            f"Link: {existing_mr.web_url}")
-                
-            except Exception as e:
-                # If checking fails due to permissions, we fall through to the creation attempt
-                print(f"Warning during MR check (possibly permission issue): {e}")
-
-
                 mr = project.mergerequests.create({
                     'source_branch': source_branch,
                     'target_branch': target_branch,
@@ -649,89 +636,100 @@ class OpenMergeRequest(Tool):
                 })
                 web_url = getattr(mr, 'web_url', 'Unknown URL')
                 iid = getattr(mr, 'iid', 'Unknown IID')
-            except Exception as creation_error:
-                # Handle cases where the server returns a 200 OK text/HTML response instead of JSON
-                error_msg = str(creation_error)
-                if "Attempted to initialize RESTObject with a non-dictionary value" in error_msg:
-                    return f"❌ Server returned an unparseable response (Status 200 OK), likely due to missing JSON headers or proxy interception."
-                raise creation_error
-            
-            return f"✅ Success: Merge Request created! View it here: {web_url} (IID: {iid})."
-            
+                return f"✅ Success: Merge Request created! View it here: {web_url} (IID: {iid})."
+
+            except gitlab.exceptions.GitlabCreateError as e:
+                error_message = str(e)
+                if "Another open merge request already exists" in error_message:
+                    return (f"⚠️ Status Alert: A Merge Request already exists for '{source_branch}' and cannot be duplicated. "
+                            f"No action taken. Details: {error_message}")
+                return f"❌ Failed to create Merge Request: {error_message}"
+
         except gitlab.exceptions.GitlabAuthenticationError:
             return "❌ Authentication failed. Check your access token and project permissions."
-        except gitlab.exceptions.GitlabCreateError as e:
-            return f"❌ Failed to create Merge Request. Possible reasons: 1) The source branch '{source_branch}' does not exist. 2) The target branch '{target_branch}' is unreachable. Details: {e.error_message}"
         except Exception as e:
-            return f"❌ An unexpected error occurred during the merge request process: {e}"
+            return f"❌ An unexpected error occurred during the merge request process: {str(e)}"
 
 
-class CommentWorkItem(Tool):
+class Comment(Tool):
     """
     Posts a standardized comment to the original GitLab work item (issue). 
-    This action notifies reviewers and links the associated Merge Request (MR).
+    The tool automatically prefixes the comment based on the specified recipient role.
     """
-    name = "comment_on_work_item"
-    description = "Posts a structured comment to the original work item (issue) to notify reviewers and provide a direct link to the newly created Merge Request (MR). Must be run after the MR is successfully opened."
+    name = "comment"
+    description = "Posts a structured comment to the original work item (issue) to notify specific roles (Developer, Reviewer, Human) or provide general updates. The comment will be automatically prefixed with '@AGENT_DEV', '@AGENT_REV', or '@HUMAN' based on the specified recipient type."
     output_type = "string"
 
-    def __init__(self, gitlab_url: str, project_id: str, access_token: str, default_mr_link: str):
+    def __init__(self, gitlab_url: str, project_id: str, access_token: str):
         super().__init__()
         self.gitlab_url = gitlab_url
         self.access_token = access_token
         self.project_id = project_id
-        self.default_mr_link = default_mr_link # Used for default comment structure
 
     @property
     def inputs(self):
         return {
-            "issue_iid": {
+            "work_item_id": {
                 "type": "string",
-                "description": "The internal ID (IID) of the original issue/work item to comment on."
+                "description": "The internal ID (IID) of the original issue/work item to comment on. This ID is used to locate the specific issue in the project."
             },
-            "mr_url": {
+            "comment_content": {
                 "type": "string",
-                "description": "The direct URL link to the Merge Request that was just created, so the reviewer can inspect the changes."
+                "description": "The primary content of the message to be left in the comment. Do not include the prefix in this field."
+            },
+            "recipient_type": {
+                "type": "string",
+                "description": "The role being addressed for the comment. Must be one of: 'DEVELOPER' (for @AGENT_DEV), 'REVIEWER' (for @AGENT_REV), or 'HUMAN' (for @HUMAN). The tool will automatically apply the correct prefix."
             }
         }
     
-    def forward(self, issue_iid: str, mr_url: str) -> str:
+    def forward(self, work_item_id: str, comment_content: str, recipient_type: str) -> str:
         """
-        Connects to GitLab and posts the structured comment to the specified issue.
+        Constructs the full comment body with the appropriate prefix and posts it to GitLab.
         """
-        if not self.gitlab_url or not self.access_token or not self.project_id:
-            return "Error: CommentWorkItem could not be initialized. Missing GitLab URL, Token, or Project ID."
+        
+        # 1. Validate and Prefix the Comment
+        prefix_map = {
+            "DEVELOPER": "@AGENT_DEV",
+            "REVIEWER": "@AGENT_REV",
+            "HUMAN": "@HUMAN"
+        }
 
-        # Construct the standardized comment message
-        comment_body = (
-            f"@AGENT_REV\n\n"
-            f"The changes for this issue are complete, tested, and ready for review! ✅\n"
-            f"I have opened a Merge Request for your inspection.\n\n"
-            f"➡️ **Review Merge Request Here:** {mr_url}"
-        )
+        prefix = prefix_map.get(recipient_type.upper())
+        
+        if not prefix:
+            return f"Error: Invalid recipient type '{recipient_type}'. Must be one of: DEVELOPER, REVIEWER, or HUMAN."
+
+        # Construct the final, fully formatted comment body
+        full_comment_body = f"{prefix} {comment_content}"
+
+        # 2. Initialize the GitLab client
+        if not self.gitlab_url or not self.access_token or not self.project_id:
+            return "Error: Comment tool could not be initialized. Missing GitLab URL, Token, or Project ID."
 
         try:
-            # 1. Initialize the GitLab client
-            gl = gitlab.Gitlab(self.gitlab_url, private_token=self.access_token)
+            gl = gitlab.Gitlab(self.gitlab_url, private_token=self.access_token, ssl_verify=False, keep_base_url=True)
+            gl.auth()
             project = gl.projects.get(self.project_id)
 
             if not project:
                 return f"Error: Could not find project with ID {self.project_id}."
 
-            # 2. Append the comment to the issue
-            issue = project.issues.get(issue_iid)
-            if not issue:
-                return f"Error: Could not find the specified issue (IID: {issue_iid}) in this project."
-
-            # Use the API to append the comment
-            issue.notes.create({'description': comment_body})
+            # 3. Check and Post the Comment
+            try:
+                issue = project.issues.get(work_item_id)
+            except gitlab.exceptions.GitlabCreateError:
+                return f"Error: Could not find the specified issue (IID: {work_item_id}) in this project. Please verify the ID."
             
-            return f"✅ Success: Successfully posted the review request comment to Issue {issue_iid}. Reviewers have been notified and the MR link is provided."
+            # Use the API to append the comment
+            issue.notes.create({'body': full_comment_body})
+            
+            return f"✅ Success: Comment successfully posted to Issue {work_item_id} with the prefix '{prefix}'. The full message sent was:\n\n---\n{full_comment_body}\n---"
             
         except gitlab.exceptions.GitlabAuthenticationError:
-            return "❌ Authentication failed. Check your access token and project permissions (Ensure the token has 'api' scope)."
+            return "❌ Authentication failed. Check your access token and project permissions (Ensure the token has 'api' scope for reading and writing issues)."
         except gitlab.exceptions.GitlabCreateError as e:
-            # This often means the issue_iid is invalid or the project is inaccessible
-            return f"❌ Failed to post comment due to GitLab error. Check issue ID ({issue_iid}) and project visibility. Details: {e.error_message}"
+            return f"❌ Failed to post comment due to GitLab error. Check issue ID ({work_item_id}) and project visibility. Details: {e.error_message}"
         except Exception as e:
-            return f"❌ An unexpected error occurred during the comment posting process: {e}"        
+            return f"❌ An unexpected error occurred during the comment posting process: {e}"
+

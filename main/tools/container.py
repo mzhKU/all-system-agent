@@ -1,3 +1,5 @@
+from typing import Any
+
 import docker
 import os
 import time
@@ -30,10 +32,15 @@ def restart_if_stopped(container):
         container.reload() 
         print(f"Container state updated to: {container.status}")
 
+def get_clean_container_id(container_id: str):
+    if not container_id:
+        return "Error: No container ID provided."
+        
+    clean_id = container_id.strip("<>").replace("Container: ", "").strip()
 
 class ContainerStatus(Tool):
     name = "check_container_status"
-    description = "This tool can be used to check the status of a Docker container"
+    description = "This tool can be used to check the status of a Docker container using its name or ID string."
     output_type = "string"
 
     def __init__(self, client):
@@ -43,25 +50,29 @@ class ContainerStatus(Tool):
     @property
     def inputs(self):
         return {
-            "container": {
-                "type": "object",
-                "description": "A reference of a Docker container for which the status can be checked."
+            "container_id_or_container": {
+                "type": "any",
+                "description": "The name or ID string of the Docker container."
             }
         }
     
-    def forward(self, container) -> str:
-        print("X"*30)
-        print("CHECKING CONTAINER STATUS...")
-        if container is None:
-            return False
-        container_status = container.status
-        print(f"Status of container \"{container.name}\": " + container_status)
-        return {"container_status": container_status}
+    def forward(self, container_id_or_container: Any) -> str:
+        # Check if framework passed Container instance or container_id string
+        if hasattr(container_id_or_container, 'id'):
+            clean_id = container_id_or_container.id
+        else:
+            clean_id = get_clean_container_id(str(container_id_or_container))
+        try:
+            container = self.client.containers.get(clean_id)
+            container.reload()
+            return f"Status of container \"{container.name}\": {container.status}"
+        except docker.errors.NotFound:
+            return f"Error: Container '{clean_id}' could not be found."
 
 
 class RemoveContainer(Tool):
     name = "remove_container"
-    description = "This tool can be used to remove a container."
+    description = "This tool can be used to remove a container using its container name or ID string."
     output_type = "string"
 
     def __init__(self, client: docker.DockerClient):
@@ -71,16 +82,27 @@ class RemoveContainer(Tool):
     @property
     def inputs(self):
         return {
-            "container": {
-                "type": "object",
-                "description": "The container to remove"
+            "container_id_or_container": {
+                "type": "any",
+                "description": "The container or ID string of the container to remove (e.g., 'alpine')."
             }
         }
     
-    def forward(self, container: Container):
-        container.stop()
-        container.remove()
-        return f"Container removed: {container.name}"
+    def forward(self, container_id_or_container: Any) -> str:
+        try:
+            # Clean up framework string wrapping if passed verbatim
+            if hasattr(container_id_or_container, 'id'):
+                clean_id = container_id_or_container.id
+            else:
+                clean_id = get_clean_container_id(str(container_id_or_container))       
+            container = self.client.containers.get(clean_id)
+            container.stop()
+            container.remove()
+            return f"Container removed: {clean_id}"
+        except docker.errors.NotFound:
+            return f"Error: Container '{clean_id}' not found."
+        except Exception as e:
+            return f"Error removing container: {str(e)}"
 
 
 class InstallUtilities(Tool):
@@ -95,22 +117,27 @@ class InstallUtilities(Tool):
     @property
     def inputs(self):
         return {
-            "container": {
-                "type": "object",
-                "description": "The container into which utilities should be installed."
+            "container_id_or_container": {
+                "type": "any",
+                "description": "The container or ID of the container into which utilities should be installed."
             },
-            "utility": {
+            "utility_name": {
                 "type": "string",
                 "description": "The utility to install. Only the program git is allowed."
             }
         }
 
-    def forward(self, container: Container, utility: str) -> str:
+    def forward(self, container_id_or_container: str, utility_name: str) -> str:
         try:
+            if hasattr(container_id_or_container, 'id'):
+                clean_id = container_id_or_container.id
+            else:
+                clean_id = get_clean_container_id(str(container_id_or_container))       
+            container = self.client.containers.get(clean_id)
             wait_for_startup(container)
-            exit_code, output = container.exec_run(f"apk add --no-cache {utility}")
+            exit_code, output = container.exec_run(f"apk add --no-cache {utility_name}")
             if exit_code == 0:
-                return f"Utility {utility} successfully installed"
+                return f"Utility {utility_name} successfully installed"
             else:
                 return f"Installation of {utility} failed."
         except Exception as e:
@@ -172,7 +199,7 @@ class StartContainer(Tool):
         try:
             container = self.client.containers.get(container_name)
             restart_if_stopped(container)
-            return {"container": container}
+            return container
         except docker.errors.NotFound as e:
             print("Container not found, creating new...")
 
@@ -188,7 +215,7 @@ class StartContainer(Tool):
                 remove=False,
                 volumes=volumes                
             )        
-            return { "container": container }
+            return container
 
 
 class CreateVolume(Tool):
