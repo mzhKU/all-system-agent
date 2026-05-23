@@ -26,7 +26,8 @@ from main.tools.repository import \
     GitCommit,       \
     PushBranch,      \
     OpenMergeRequest,\
-    CreateFile
+    CreateFile,      \
+    Comment
 
 def generate_dummy_java_file():
     dummy_random_string = str(random.randint(0, 100))
@@ -49,7 +50,7 @@ if __name__ == "__main__":
     gitlab_repo = "mzhku/all-system-development.git"
     project_id = 1
     default_title = "Default Merge Request Title"
-    issue_iid = 10
+    issue_iid = 1
     mr_url = "abc"
 
     dummy_namespace_project = "mzhku/all-system-development.git"
@@ -62,8 +63,9 @@ if __name__ == "__main__":
     dummy_source_branch = "dummy_branch"
     dummy_target_branch = "main"
     dummy_merge_request_title = "Merge request"
+    dummy_comment = "The work is done, please review the merge request."
     
-    CREATE_CONTAINER = """
+    CREATE_VOLUME = """
         Thought: I will first create a volume.
         ```
         <code>
@@ -75,7 +77,7 @@ if __name__ == "__main__":
         Thought: I will now start a container.
         ```
         <code>
-        container = start_container(image="alpine:3.19", volume_mounts_data=volume_mounts)
+        container_id = start_container(image="alpine:3.19", volume_mounts_data=volume_mounts)
         </code>
         ```
         """
@@ -83,7 +85,7 @@ if __name__ == "__main__":
         Thought: I will check the status of the container.
         ```
         <code>
-        check_container_status(container)
+        check_container_status(container_id_or_container=container_id)
         </code>
         ```
         """
@@ -93,7 +95,7 @@ if __name__ == "__main__":
         If the container is not running, I need to check if it is still starting, or if it needs to be started.
         ```
         <code>
-        install_status = install_utilities(container, "git")
+        install_status = install_utilities(container_id_or_container=container_id, utility_name="git")
         </code>
         ```
         """
@@ -193,7 +195,7 @@ if __name__ == "__main__":
         Thought: I will post a comment to the issue addressing the REVIEWER to take a look at my merge request.
         ```
         <code>
-        comment(issue_iid="{issue_iid}", mr_url="{mr_url}")
+        comment(issue_iid="{issue_iid}", comment_content="{dummy_comment}", recipient_type="REVIEWER")
         </code>
         ```
         """
@@ -201,7 +203,7 @@ if __name__ == "__main__":
         Thought: This is all I need to do, I will remove the container.
         ```
         <code>
-        remove_container(container)
+        remove_container(container_id_or_container=container_id)
         </code>
         ```
         """
@@ -215,7 +217,7 @@ if __name__ == "__main__":
         """
 
     mocked_llm_steps = [
-        CREATE_CONTAINER,
+        CREATE_VOLUME,
         START_CONTAINER,
         CHECK_STATUS,
         INSTALL_UTILITY,
@@ -231,7 +233,7 @@ if __name__ == "__main__":
         GIT_STATUS,
         PUSH_BRANCH,
         OPEN_MERGE_REQUEST,
-        # POST_COMMENT_TO_WORK_ITEM,
+        POST_COMMENT_TO_WORK_ITEM,
         REMOVE_CONTAINER,
         FINAL_ANSWER
     ]
@@ -274,6 +276,11 @@ if __name__ == "__main__":
                 project_id=f"{project_id}",
                 access_token=f"{gitlab_token}",
                 default_title=f"{default_title}"
+            ),
+            Comment(
+                gitlab_url=f"http://{gitlab_host}:{gitlab_port}",
+                project_id=f"{project_id}",
+                access_token=f"{gitlab_token}"
             )
         ],
         stream_outputs=False,
