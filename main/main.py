@@ -104,6 +104,9 @@ def create_code_agent(model: OpenAIServerModel, user_comment: str, token: str):
         instructions=CODE_AGENT_INSTRUCTIONS
     )
 
+def something():
+    print("Here")
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     event_type = request.headers.get("X-Gitlab-Event", "Unknown")
