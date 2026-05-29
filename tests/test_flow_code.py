@@ -27,7 +27,8 @@ from main.tools.repository import \
     PushBranch,      \
     OpenMergeRequest,\
     CreateFile,      \
-    Comment
+    Comment,         \
+    GitDiff
 
 def generate_dummy_java_file():
     dummy_random_string = str(random.randint(0, 100))
@@ -50,7 +51,7 @@ if __name__ == "__main__":
     gitlab_repo = "mzhku/all-system-development.git"
     project_id = 1
     default_title = "Default Merge Request Title"
-    issue_iid = 1
+    work_item_id = 1
     mr_url = "abc"
 
     dummy_namespace_project = "mzhku/all-system-development.git"
@@ -195,7 +196,7 @@ if __name__ == "__main__":
         Thought: I will post a comment to the issue addressing the REVIEWER to take a look at my merge request.
         ```
         <code>
-        comment(issue_iid="{issue_iid}", comment_content="{dummy_comment}", recipient_type="REVIEWER")
+        comment(work_item_id="{work_item_id}", comment_content="{dummy_comment}", recipient_type="REVIEWER")
         </code>
         ```
         """
