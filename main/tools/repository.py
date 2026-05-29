@@ -662,7 +662,7 @@ class Comment(Tool):
     name = "comment"
     description = "Posts a structured comment to the original work item (issue). " \
                   "It notifies roles (Developer, Reviewer, Human) or provides general updates. " \
-                  "The comment will be automatically prefixed with '@AGENT_DEV', '@AGENT_REV', or '@HUMAN' " \
+                  "The comment must be prefixed with '@AGENT_DEV', '@AGENT_REV', or '@HUMAN' " \
                   "depending on who should be the recipient."
     output_type = "string"
 
