@@ -38,8 +38,8 @@ load_dotenv()
 
 app = Flask(__name__)
 
-QWEN = "qwen3.5:latest"
-GEMMA = "gemma4:latest"
+QWEN_35 = "qwen3.5:latest"
+GEMMA_4_8B = "gemma4:latest"
 
 OLLAMA_BASE_URL = "http://100.122.48.109:11434/v1"
 OLLAMA_API_KEY = "dummy"
@@ -51,7 +51,7 @@ DOCKER_IMAGE_ALPINE = "alpine:3.19"
 GITLAB_HOST = "100.122.48.109"
 GITLAB_PORT = 8081
 GITLAB_REPO = "mzhku/all-system-development.git"
-GITLAB_TOKEN = "glpat-afRR9teu-luAe5JxqKY-2G86MQp1OjgH.01.0w1kmzta8"
+GITLAB_TOKEN_MAINTAINER_API = "glpat-G1fVHSZ2erhAolGMXmsc5W86MQp1OmEH.01.0w0hnniho"
 
 REPO_NAME = "mzhku/all-system-development"
 API_URL = "/api/v4/projects"
@@ -93,7 +93,7 @@ def create_review_agent(model: OpenAIServerModel, token: str):
             ApproveOrReject(
                 gitlab_url=f"http://{GITLAB_HOST}:{GITLAB_PORT}",
                 project_id=f"{PROJECT_ID}",
-                access_token=f"{GITLAB_TOKEN}"
+                access_token=f"{GITLAB_TOKEN_MAINTAINER_API}"
             )
         ],
         model=model,
@@ -140,13 +140,13 @@ def create_code_agent(model: OpenAIServerModel, token: str):
             OpenMergeRequest(
                 gitlab_url=f"http://{GITLAB_HOST}:{GITLAB_PORT}",
                 project_id=f"{PROJECT_ID}",
-                access_token=f"{GITLAB_TOKEN}",
+                access_token=f"{GITLAB_TOKEN_MAINTAINER_API}",
                 default_title="Default Merge Request Title"
             ),
             Comment(
                 gitlab_url=f"http://{GITLAB_HOST}:{GITLAB_PORT}",
                 project_id=f"{PROJECT_ID}",
-                access_token=f"{GITLAB_TOKEN}"
+                access_token=f"{GITLAB_TOKEN_MAINTAINER_API}"
             )
         ],
         stream_outputs=False,
@@ -162,7 +162,7 @@ def webhook():
 
     if event_type == "Note Hook":    
 
-        repository_url_with_token = f"http://oauth2:{GITLAB_TOKEN}@{GITLAB_HOST}:{GITLAB_PORT}/{payload['project']['path_with_namespace']}"
+        repository_url_with_token = f"http://oauth2:{GITLAB_TOKEN_MAINTAINER_API}@{GITLAB_HOST}:{GITLAB_PORT}/{payload['project']['path_with_namespace']}"
         user_comment = payload['object_attributes']['description']
         user_id      = str(payload['object_attributes']['author_id'])
         noteable_id = payload['object_attributes']['noteable_id'] # Work item id
@@ -205,7 +205,8 @@ def webhook():
         You will need to open a merge request for your changes.
         You need to leave a comment on the work item describing your changes.
         In your comment describing your changes, DO NOT start with @AGENT_DEV, because this would address the comment to yourself.
-        If you opened a merge request and want to request a review, you should start the comment with "@AGENT_REV".
+        When you open a merge request you must write a comment to ask for review.
+        You must start your comment with the string "@AGENT_REV" to address it to the review agent.
         If you want to ask for review, the "@AGENT_REV" prefix MUST BE the FIRST string in your comment.
         If you need more clarification on the work item, you should write a comment to the work item to ask for more clarifications.
         When asking for more clarifications, start the comment with "@HUMAN".
@@ -227,9 +228,9 @@ def webhook():
         print("FROM AUTHOR ID [" + user_id + "]: " + user_comment)
 
         if user_target == "DEVELOPER":
-            code_agent.run(agent_dev_prompt)
+            developer_agent.run(agent_dev_prompt)
         if user_target == "REVIEWER":
-            review_agent.run(agent_rev_prompt)
+            reviewer_agent.run(agent_rev_prompt)
     else:
         print(f"📦 Received event: {event_type}")
 
@@ -237,7 +238,8 @@ def webhook():
     return jsonify({"status": "OK"}), 200 # CHECK THIS
 
 if __name__ == "__main__":
-    model = OpenAIServerModel(model_id=GEMMA, api_base=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
-    code_agent = create_code_agent(model, TOKEN)
-    review_agent = create_review_agent(model, TOKEN)
+    model_developer = OpenAIServerModel(model_id=GEMMA_4_8B, api_base=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
+    model_reviewer = OpenAIServerModel(model_id=GEMMA_4_8B, api_base=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
+    developer_agent = create_code_agent(model_developer, TOKEN)
+    reviewer_agent = create_review_agent(model_reviewer, TOKEN)
     app.run(host="0.0.0.0", port=5000)
