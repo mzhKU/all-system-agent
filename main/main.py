@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flask      import Flask, request, jsonify
 from dotenv     import load_dotenv
-from smolagents import CodeAgent, OpenAIServerModel
+from smolagents import CodeAgent, ToolCallingAgent, OpenAIServerModel
 
 
 from main.tools.container import \
@@ -30,7 +30,8 @@ from main.tools.repository import \
     PushBranch,      \
     OpenMergeRequest,\
     CreateFile,      \
-    Comment
+    Comment,         \
+    ApproveOrReject
 
 load_dotenv()
 
@@ -55,13 +56,51 @@ GITLAB_TOKEN = "glpat-afRR9teu-luAe5JxqKY-2G86MQp1OjgH.01.0w1kmzta8"
 REPO_NAME = "mzhku/all-system-development"
 API_URL = "/api/v4/projects"
 TOKEN = os.getenv("TOKEN") # Expires 06.06.2026
-PROJECT_ID = "1"
+PROJECT_ID = "1" # TODO: Figure out how to make this dynamic
 SOURCE_BRANCH = "dev"
 TARGET_BRANCH = "main"
 
 CODE_AGENT_INSTRUCTIONS = "You are not allowed to use internal knowledge for facts. Every factual statement must come from a tool call."
 
-def create_code_agent(model: OpenAIServerModel, user_comment: str, token: str):
+def create_review_agent(model: OpenAIServerModel, token: str):
+    client = docker.from_env()
+
+    if client is None:
+        return False
+    
+    local_repository_path = str(Path(os.path.abspath("agent-data")).resolve()) # Absolute path on the host
+    volume_target = "/app/data"  # Path inside the container
+
+    return CodeAgent(
+        tools=[
+            StartContainer(client),
+            ContainerStatus(client),
+            CreateVolume(
+                target=volume_target,
+                source=local_repository_path
+            ),
+            RemoveContainer(client),
+            CloneRepository(
+                host=GITLAB_HOST,
+                port=GITLAB_PORT,
+                access_token=token,
+                local_repository_path=local_repository_path,
+                local_repository_path_backup=local_repository_path + "-backup"
+            ),
+            CheckoutBranch(local_repository_path),
+            ListCode(local_repository_path),
+            ReadCode(local_repository_path),
+            ApproveOrReject(
+                gitlab_url=f"http://{GITLAB_HOST}:{GITLAB_PORT}",
+                project_id=f"{PROJECT_ID}",
+                access_token=f"{GITLAB_TOKEN}"
+            )
+        ],
+        model=model,
+        stream_outputs=False
+    )
+
+def create_code_agent(model: OpenAIServerModel, token: str):
     client = docker.from_env()
     
     if client is None:
@@ -76,7 +115,7 @@ def create_code_agent(model: OpenAIServerModel, user_comment: str, token: str):
             ContainerStatus(client),
             CreateVolume(
                 target=volume_target,
-                source=local_repository_path,
+                source=local_repository_path
             ),
             # InstallUtilities(client),
             RemoveContainer(client),
@@ -116,13 +155,11 @@ def create_code_agent(model: OpenAIServerModel, user_comment: str, token: str):
         instructions=CODE_AGENT_INSTRUCTIONS
     )
 
-def something():
-    print("Here")
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
     event_type = request.headers.get("X-Gitlab-Event", "Unknown")
     payload = request.json
+
     if event_type == "Note Hook":    
 
         repository_url_with_token = f"http://oauth2:{GITLAB_TOKEN}@{GITLAB_HOST}:{GITLAB_PORT}/{payload['project']['path_with_namespace']}"
@@ -130,6 +167,8 @@ def webhook():
         user_id      = str(payload['object_attributes']['author_id'])
         noteable_id = payload['object_attributes']['noteable_id'] # Work item id
 
+        # TODO: Remove this indirection just use the user comment prefix directly
+        # TODO: Instead of this control logic, check if specific webhooks can be defined
         if user_comment.startswith("@AGENT_DEV"):
             user_target = "DEVELOPER"
         elif user_comment.startswith("@AGENT_REV"):
@@ -165,7 +204,9 @@ def webhook():
         You will need to push your changes to the remote repository.
         You will need to open a merge request for your changes.
         You need to leave a comment on the work item describing your changes.
+        In your comment describing your changes, DO NOT start with @AGENT_DEV, because this would address the comment to yourself.
         If you opened a merge request and want to request a review, you should start the comment with "@AGENT_REV".
+        If you want to ask for review, the "@AGENT_REV" prefix MUST BE the FIRST string in your comment.
         If you need more clarification on the work item, you should write a comment to the work item to ask for more clarifications.
         When asking for more clarifications, start the comment with "@HUMAN".
         When you finish your work, you should remove the container that you started and checkout branch "main" again.
@@ -173,16 +214,22 @@ def webhook():
 
         agent_rev_prompt = f"""
         You're a quality assurance and code reviewer agent.
+        A developer agent implemented changes or fixes for a work item.
+        The work item id is {noteable_id}.
+        The URL of the repository of this work item is {repository_url_with_token}.
+        The developer wrote this comment to the work item: {user_comment}.
+        You should review the work and either approve it or reject it.
+        If you reject it, you should leave a comment on the work item describing the shortcomings or whatever change you still require.
+        If you comment to request more changes, you must start your comment with "@AGENT_DEV" for the agent to identify the comment correctly.
+        The string "@AGENT_DEV" MUST be the FIRST string in your comment.
         """
 
         print("FROM AUTHOR ID [" + user_id + "]: " + user_comment)
 
-        model = OpenAIServerModel(model_id=GEMMA, api_base=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
-
         if user_target == "DEVELOPER":
-            agent = create_code_agent(model, user_comment, TOKEN)
-            agent.run(agent_dev_prompt)
-
+            code_agent.run(agent_dev_prompt)
+        if user_target == "REVIEWER":
+            review_agent.run(agent_rev_prompt)
     else:
         print(f"📦 Received event: {event_type}")
 
@@ -190,4 +237,7 @@ def webhook():
     return jsonify({"status": "OK"}), 200 # CHECK THIS
 
 if __name__ == "__main__":
+    model = OpenAIServerModel(model_id=GEMMA, api_base=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
+    code_agent = create_code_agent(model, TOKEN)
+    review_agent = create_review_agent(model, TOKEN)
     app.run(host="0.0.0.0", port=5000)

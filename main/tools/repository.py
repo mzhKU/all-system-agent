@@ -564,7 +564,12 @@ class OpenMergeRequest(Tool):
     for the source branch, this tool retrieves and reports its details instead of failing.
     """
     name = "open_merge_request"
-    description = "Creates a Pull Request/Merge Request on GitLab. This tool checks if an MR already exists for the source branch and, if so, reports its details. If it does not exist, a new MR is created. Requires the source branch, target branch, and a title."
+    description = "Creates a Merge Request on GitLab. " \
+                  "This tool checks if a merge request already exists for the source branch. " \
+                  "If a merge request already exists, it reports its details. " \
+                  "If it does not exist, a new merge request is created. " \
+                  "Requires the source branch, target branch, and a title. " \
+                  "Returns a success message containing the MR_IID (Merge Request internal id) for execution history."
     output_type = "string"
 
     def __init__(self, gitlab_url: str, project_id: str, access_token: str, default_title: str):
@@ -588,7 +593,7 @@ class OpenMergeRequest(Tool):
             },
             "custom_title": {
                 "type": "string",
-                "description": "Optional custom title for the merge request. If empty, a default title will be used."
+                "description": "Title for the merge request. If empty, a default title will be used."
             }
         }
     
@@ -602,7 +607,6 @@ class OpenMergeRequest(Tool):
         title = custom_title if custom_title else self.default_title
         
         try:
-            # 1. Initialize the GitLab client
             gl = gitlab.Gitlab(self.gitlab_url, private_token=self.access_token, ssl_verify=False, keep_base_url=True)
             gl.auth()
             project = gl.projects.get(self.project_id)
@@ -615,17 +619,11 @@ class OpenMergeRequest(Tool):
             mr_list = project.mergerequests.list(source_branch=source_branch, state="opened")
             if mr_list:
                 existing_mr = mr_list[0]
+                web_url = getattr(existing_mr, 'web_url', f"{project.web_url}/-/merge_requests/{existing_mr.iid}")
 
-                # TODO: Make this generic
-                # Statically construct the URL using class attributes and the MR IID
-                base = self.gitlab_url.rstrip("/")
-                repo_path = "mzhku/all-system-development"
-                corrected_url = f"{base}/{repo_path}/-/merge_requests/{existing_mr.iid}"         
-
-                return (f"✅ Found Existing MR: A Merge Request already exists for '{source_branch}' "
-                        f"targeting '{target_branch}'. Details: "
-                        f"MR ID: {existing_mr.iid}, Title: '{existing_mr.title}', "
-                        f"Link: {corrected_url}")
+                return (f"✅ Found Existing MR. MR_IID: {existing_mr.iid}. "
+                        f"A Merge Request already exists for '{source_branch}' targeting '{target_branch}'. "
+                        f"Title: '{existing_mr.title}', Link: {web_url}")
 
             # --- CREATION STAGE ---
             try:
@@ -634,13 +632,17 @@ class OpenMergeRequest(Tool):
                     'target_branch': target_branch,
                     'title': title,
                 })
-                web_url = getattr(mr, 'web_url', 'Unknown URL')
+                web_url = getattr(mr, 'web_url', f"{project.web_url}/-/merge_requests/{mr.iid}")
                 iid = getattr(mr, 'iid', 'Unknown IID')
                 return f"✅ Success: Merge Request created! View it here: {web_url} (IID: {iid})."
 
             except gitlab.exceptions.GitlabCreateError as e:
                 error_message = str(e)
                 if "Another open merge request already exists" in error_message:
+                    # Fallback lookup if race condition occurs
+                    fallback_list = project.mergerequests.list(source_branch=source_branch, state="opened")
+                    if fallback_list:
+                        return f"⚠️ Status Alert. MR_IID: {fallback_list[0].iid}. Merge Request already exists."
                     return (f"⚠️ Status Alert: A Merge Request already exists for '{source_branch}' and cannot be duplicated. "
                             f"No action taken. Details: {error_message}")
                 return f"❌ Failed to create Merge Request: {error_message}"
@@ -654,10 +656,14 @@ class OpenMergeRequest(Tool):
 class Comment(Tool):
     """
     Posts a standardized comment to the original GitLab work item (issue). 
-    The tool automatically prefixes the comment based on the specified recipient role.
+    The tool automatically prefixes the comment based on the specified recipient role
+    and ensures critical metadata (like Merge Request IDs) is structured.
     """
     name = "comment"
-    description = "Posts a structured comment to the original work item (issue) to notify specific roles (Developer, Reviewer, Human) or provide general updates. The comment will be automatically prefixed with '@AGENT_DEV', '@AGENT_REV', or '@HUMAN' based on the specified recipient type."
+    description = "Posts a structured comment to the original work item (issue). " \
+                  "It notifies roles (Developer, Reviewer, Human) or provides general updates. " \
+                  "The comment will be automatically prefixed with '@AGENT_DEV', '@AGENT_REV', or '@HUMAN' " \
+                  "depending on who should be the recipient."
     output_type = "string"
 
     def __init__(self, gitlab_url: str, project_id: str, access_token: str):
@@ -680,12 +686,17 @@ class Comment(Tool):
             "recipient_type": {
                 "type": "string",
                 "description": "The role being addressed for the comment. Must be one of: 'DEVELOPER' (for @AGENT_DEV), 'REVIEWER' (for @AGENT_REV), or 'HUMAN' (for @HUMAN). The tool will automatically apply the correct prefix."
-            }
+            },
+            "merge_request_id": {
+                "type": "string",
+                "nullable": True,
+                "description": "REQUIRED when recipient_type is 'REVIEWER'. Provide the internal ID (IID) of the Merge Request created for this task so the reviewer agent can find it."
+            }            
         }
     
-    def forward(self, work_item_id: str, comment_content: str, recipient_type: str) -> str:
+    def forward(self, work_item_id: str, comment_content: str, recipient_type: str, merge_request_id: str = None) -> str:
         """
-        Constructs the full comment body with the appropriate prefix and posts it to GitLab.
+        Constructs the full comment body with the appropriate prefix and metadata, then posts it to GitLab.
         """
         
         # 1. Validate and Prefix the Comment
@@ -695,13 +706,21 @@ class Comment(Tool):
             "HUMAN": "@HUMAN"
         }
 
-        prefix = prefix_map.get(recipient_type.upper())
+        recipient_upper = recipient_type.upper()
+        prefix = prefix_map.get(recipient_upper)
         
         if not prefix:
             return f"Error: Invalid recipient type '{recipient_type}'. Must be one of: DEVELOPER, REVIEWER, or HUMAN."
 
-        # Construct the final, fully formatted comment body
-        full_comment_body = f"{prefix} {comment_content}"
+        # Enforce the inclusion of MR ID when handing off to the reviewer
+        if recipient_upper == "REVIEWER" and not merge_request_id:
+            return "Error: A 'merge_request_id' must be provided when notifying the REVIEWER."
+
+        body_parts = [f"{prefix} {comment_content}"]
+        if recipient_upper == "REVIEWER" and merge_request_id:
+            body_parts.append(f"\n- **Merge Request IID:** {merge_request_id}")
+
+        full_comment_body = "\n".join(body_parts)
 
         # 2. Initialize the GitLab client
         if not self.gitlab_url or not self.access_token or not self.project_id:
@@ -720,8 +739,7 @@ class Comment(Tool):
                 issue = project.issues.get(work_item_id)
             except gitlab.exceptions.GitlabCreateError:
                 return f"Error: Could not find the specified issue (IID: {work_item_id}) in this project. Please verify the ID."
-            
-            # Use the API to append the comment
+
             issue.notes.create({'body': full_comment_body})
             
             return f"✅ Success: Comment successfully posted to Issue {work_item_id} with the prefix '{prefix}'. The full message sent was:\n\n---\n{full_comment_body}\n---"
@@ -732,4 +750,175 @@ class Comment(Tool):
             return f"❌ Failed to post comment due to GitLab error. Check issue ID ({work_item_id}) and project visibility. Details: {e.error_message}"
         except Exception as e:
             return f"❌ An unexpected error occurred during the comment posting process: {e}"
+
+
+class ApproveOrReject(Tool):
+    """
+    Acts as the code review gatekeeper. This tool evaluates a Merge Request (MR).
+    If approved, it merges the MR into the target branch. If rejected, it posts
+    a rejection comment to the original work item (issue) and advises no action.
+    """
+    name = "approve_or_reject_merge_request"
+    description = """
+    Evaluates a Merge Request (MR). 
+    1. If approved, it performs the MERGE operation on the MR, finalizing the work.
+    2. If rejected, it MUST NOT merge the MR. Instead, it uses the Comment tool 
+       to post specific feedback on the original work item, guiding the developer 
+       on the necessary fixes.
+    """
+    output_type = "string"
+
+    def __init__(self, gitlab_url: str, project_id: str, access_token: str):
+        super().__init__()
+        self.gitlab_url = gitlab_url
+        self.access_token = access_token
+        self.project_id = project_id
+
+    @property
+    def inputs(self):
+        return {
+            "work_item_id": {
+                "type": "string",
+                "description": "The work item ID where the review feedback should be posted."
+            },
+            "mr_iid": {
+                "type": "string",
+                "description": "The Merge Request id that needs review/action. Extract this directly from the '@AGENT_REV' handoff comment provided in your prompt. Do not guess or reuse historical IDs."
+            },
+            "action_requested": {
+                "type": "string",
+                "description": "The action to take: 'APPROVE' or 'REJECT'."
+            },
+            "comment_content": {
+                "type": "string",
+                "description": "This contains detailed technical feedback on what needs to be fixed. \
+                                It MUST start with @AGENT_DEV to address the comment at the developer agent. \
+                                If you approve the merge request, you do not include the \"@AGENT_DEV\" \
+                                prefix and just reply with \"Approved\"."
+            }
+        }
+
+    def forward(self, work_item_id: str, mr_iid: str, action_requested: str, comment_content: str) -> str:
+        """
+        Handles the core logic: merge if approved, or comment if rejected.
+        """
+        if not self.gitlab_url or not self.access_token or not self.project_id:
+            return "Error: ApproveOrReject could not be initialized. Missing GitLab URL, Token, or Project ID."
+
+        # 1. Initialize Client
+        try:
+            gl = gitlab.Gitlab(self.gitlab_url, private_token=self.access_token, ssl_verify=False, keep_base_url=True)
+            gl.auth()
+            project = gl.projects.get(self.project_id)
+        except Exception as e:
+            return f"Error: Failed to initialize GitLab connection: {str(e)}"
+
+        if not comment_content:
+            return "❌ REJECT FAILURE: Cannot reject the MR. You must provide 'comment_content' field."
+
+        # The Comment tool is responsible for the comment logic. We call it directly
+        # to prevent redundancy and ensure the prefix is correct.
+        
+        # TODO: Should call the Comment.forward() method
+        # To avoid circular dependencies in this single file, we will replicate 
+        # the comment logic here, but in a real system, the tool call would be:
+        # comment_tool_instance.forward(...)
+        
+        comment_message = f"{comment_content}"
+
+        try:
+            issue = project.issues.get(work_item_id)
+            issue.notes.create({'body': comment_message})
+        except Exception as e:
+            return f"❌ REJECTION FAILURE: Failed to post rejection comment to Issue {work_item_id}. Details: {str(e)}"
+        
+        # 2. Handle Approval (Merge)
+        if action_requested.upper() == "APPROVE":
+            try:
+                # Get the specific MR object
+                mr = project.mergerequests.get(mr_iid)
+
+                print(f"Merge Status: {mr.merge_status}")
+                print(f"Detailed Merge Status: {mr.detailed_merge_status}")
+                print(f"Has Conflicts: {mr.has_conflicts}")
+                
+                # Attempt the merge (assuming no conflicts)
+                # Note: gitlab's merge method handles the merge logic.
+                mr.merge() 
+                return f"🎉 SUCCESS: The Merge Request {mr_iid} was successfully MERGED into the target branch. The feature is now part of the codebase."
+            except gitlab.exceptions.GitlabCreateError as e:
+                return f"❌ MERGE FAILED: Could not merge the MR {mr_iid}. Possible reasons: 1) MR already merged. 2) Conflicts exist (or required permissions are missing). Details: {e.error_message}"
+            except Exception as e:
+                return f"❌ An unexpected error occurred during the merge attempt: {str(e)}"
+        # 3. Handle Rejection (Comment)
+        elif action_requested.upper() == "REJECT":
+            return (f"⚠️ REJECTED: The Merge Request {mr_iid} was NOT merged. A detailed rejection comment has been posted to the original work item (Issue {work_item_id}).")
+        
+        else:
+            return f"❌ INVALID ACTION: The action_requested must be 'APPROVE' or 'REJECT'."
+
+
+class GitDiff(Tool):
+    """
+    Compares the current state of the repository against a specified base branch 
+    or an older commit, showing exactly what changes were made. 
+    This is the primary tool for code reviewers to validate scope and quality.
+    """
+    name = "git_diff"
+    description = """
+    Shows the line-by-line difference (diff) between two points in the repository's history 
+    (e.g., the current feature branch HEAD and the 'main' branch HEAD). 
+    This must be used by reviewers to verify exactly what changes were made, 
+    checking for correctness, missing files, or unintended scope changes.
+    """
+    output_type = "string"
+
+    def __init__(self, repository_path: Path):
+        super().__init__()
+        self.repository_path = repository_path
+        self._repo = None
+        self._initialize_repo()
+
+    def _initialize_repo(self):
+        """Internal helper to initialize and validate the git repository connection."""
+        try:
+            self._repo = git.Repo(str(self.repository_path))
+        except git.InvalidGitRepositoryError:
+            print(f"Warning: Initializing GitDiff with invalid repository path: {self.repository_path}")
+            self._repo = None
+            
+    @property
+    def inputs(self):
+        return {
+            "base_branch": {
+                "type": "string",
+                "description": "The base branch or reference to compare against (e.g., 'main', 'master'). This represents the stable code."
+            },
+            "head_branch": {
+                "type": "string",
+                "description": "The branch containing the changes to be reviewed (e.g., 'feature/new-domain')."
+            },
+        }
+
+    def forward(self, base_branch: str, head_branch: str) -> str:
+        """
+        Executes 'git diff' to compare two branches.
+        """
+        if self._repo is None:
+            return "Error: Not a valid git repository. Cannot run diff."
+
+        print(f"\n[Diff Tool] Comparing '{head_branch}' against base '{base_branch}'...")
+        
+        try:
+            # Use the git command interface to get the diff output
+            # The format 'base_branch..head_branch' compares the tips of the branches.
+            diff_output = self._repo.git.diff(base_branch + "..." + head_branch)
+            return f"\n--- Diff Report: {head_branch} vs {base_branch} ---\n" + diff_output
+            
+        except git.exc.GitCommandError as e:
+            # This often happens if the branches don't exist or the repo state is bad.
+            return f"Git Command Error: Failed to retrieve diff. Ensure both branches '{base_branch}' and '{head_branch}' exist. Details: {e.stderr}"
+        except Exception as e:
+            return f"An unexpected error occurred during diff generation: {str(e)}"
+
 
